@@ -18,6 +18,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral() // Wiliot SDK is published here (com.wiliot:*)
     }
+    maven { url = uri("https://jitpack.io") }
 }
 
 rootProject.name = "WiliotPixelProximity"
