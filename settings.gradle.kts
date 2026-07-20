@@ -1,6 +1,3 @@
-rootProject.name = "WiliotPixelProximity"
-include(":app")
-
 pluginManagement {
     repositories {
         google {
@@ -20,7 +17,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral() // Wiliot SDK is published here (com.wiliot:*)
-        maven { url = uri("https://jitpack.io") } // transitive dep: paho.mqtt.android
+        maven { url = uri("https://jitpack.io") } // transitive dep: com.github.hannesa2:paho.mqtt.android
     }
 }
 

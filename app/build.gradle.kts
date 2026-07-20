@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.example.pixelproximity"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.pixelproximity"
