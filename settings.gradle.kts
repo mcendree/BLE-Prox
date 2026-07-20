@@ -16,9 +16,9 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
-        mavenCentral()
+        mavenCentral() // Wiliot SDK is published here (com.wiliot:*)
     }
 }
 
-rootProject.name = "BleProximity"
+rootProject.name = "WiliotPixelProximity"
 include(":app")

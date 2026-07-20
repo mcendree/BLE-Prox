@@ -1,1 +1,3 @@
-# Keep default Android/Compose behavior. No custom rules required for this app.
+# Keep Wiliot SDK model classes (used via reflection / serialization).
+-keep class com.wiliot.** { *; }
+-dontwarn com.wiliot.**

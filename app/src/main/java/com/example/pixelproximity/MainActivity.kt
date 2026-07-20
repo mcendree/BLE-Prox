@@ -1,7 +1,8 @@
-package com.example.bleproximity
+package com.example.pixelproximity
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -24,6 +26,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,51 +49,55 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val REQUIRED_PERMISSIONS = arrayOf(
-    Manifest.permission.BLUETOOTH_SCAN,
-    Manifest.permission.BLUETOOTH_CONNECT
-)
+private val REQUIRED_PERMISSIONS: Array<String>
+    get() = buildList {
+        add(Manifest.permission.BLUETOOTH_SCAN)
+        add(Manifest.permission.BLUETOOTH_CONNECT)
+        add(Manifest.permission.ACCESS_FINE_LOCATION) // Wiliot SDK requires location for scanning
+        if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+    }.toTypedArray()
 
 @Composable
-fun AppRoot(vm: BleScanViewModel = viewModel()) {
+fun AppRoot(vm: PixelScanViewModel = viewModel()) {
     val context = LocalContext.current
+    val store = remember { CredentialStore(context) }
+
+    var hasCreds by remember { mutableStateOf(store.hasCredentials) }
+    if (!hasCreds) {
+        CredentialsScreen(
+            initialOwner = store.ownerId,
+            initialKey = store.apiKey,
+            onSave = { owner, key ->
+                store.save(owner, key)
+                hasCreds = true
+            }
+        )
+        return
+    }
 
     fun hasPerms() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
     }
-
     var granted by remember { mutableStateOf(hasPerms()) }
-
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result -> granted = result.values.all { it } }
+    ) { granted = hasPerms() }
 
-    LaunchedEffect(Unit) {
-        if (!granted) launcher.launch(REQUIRED_PERMISSIONS)
-    }
+    LaunchedEffect(Unit) { if (!granted) launcher.launch(REQUIRED_PERMISSIONS) }
 
     if (!granted) {
         PermissionGate { launcher.launch(REQUIRED_PERMISSIONS) }
         return
     }
 
-    if (!vm.bluetoothEnabled) {
-        BluetoothOffGate()
-        return
-    }
-
-    val tracked by vm.trackedAddress.collectAsStateWithLifecycle()
-    if (tracked != null) {
-        TrackerScreen(vm)
-    } else {
-        ScanScreen(vm)
-    }
+    val tracked by vm.trackedId.collectAsStateWithLifecycle()
+    if (tracked != null) TrackerScreen(vm) else ScanScreen(vm) { store.clear(); hasCreds = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ScanScreen(vm: BleScanViewModel) {
-    val devices by vm.devices.collectAsStateWithLifecycle()
+fun ScanScreen(vm: PixelScanViewModel, onSignOut: () -> Unit) {
+    val rows by vm.rows.collectAsStateWithLifecycle()
     val scanning by vm.scanning.collectAsStateWithLifecycle()
     val query by vm.query.collectAsStateWithLifecycle()
     val calibration by vm.calibration.collectAsStateWithLifecycle()
@@ -98,13 +106,13 @@ fun ScanScreen(vm: BleScanViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("BLE Proximity") },
+                title = { Text("Wiliot Pixels") },
                 actions = {
                     IconButton(onClick = { showCalib = !showCalib }) {
                         Icon(Icons.Filled.Tune, contentDescription = "Calibration")
                     }
-                    IconButton(onClick = { vm.clear() }) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Clear list")
+                    IconButton(onClick = onSignOut) {
+                        Icon(Icons.Filled.Logout, contentDescription = "Clear credentials")
                     }
                 }
             )
@@ -129,33 +137,31 @@ fun ScanScreen(vm: BleScanViewModel) {
                 onValueChange = { vm.setQuery(it) },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 singleLine = true,
-                label = { Text("Filter by name or address") },
+                label = { Text("Search Pixel ID") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
                     if (query.isNotEmpty()) {
                         IconButton(onClick = { vm.setQuery("") }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Clear filter")
+                            Icon(Icons.Filled.Close, contentDescription = "Clear")
                         }
                     }
                 }
             )
 
             Text(
-                text = if (scanning) "Scanning • ${devices.size} device(s)"
-                else "Stopped • ${devices.size} device(s)",
+                text = if (scanning) "Scanning • ${rows.size} pixel(s)"
+                else "Stopped • press Scan",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
 
-            if (showCalib) {
-                CalibrationCard(calibration) { vm.setCalibration(it) }
-            }
+            if (showCalib) CalibrationCard(calibration) { vm.setCalibration(it) }
 
-            if (devices.isEmpty()) {
+            if (rows.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        if (scanning) "Listening for BLE advertisements…"
+                        if (scanning) "Listening for Wiliot Pixels…\nIDs appear once resolved by the cloud."
                         else "Press Scan to start",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -165,8 +171,8 @@ fun ScanScreen(vm: BleScanViewModel) {
                     contentPadding = PaddingValues(bottom = 96.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(devices, key = { it.address }) { d ->
-                        DeviceRow(d, calibration) { vm.setTracked(d.address) }
+                    items(rows, key = { it.key }) { row ->
+                        PixelRowItem(row, calibration) { vm.setTracked(row.pixelId) }
                         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     }
                 }
@@ -176,98 +182,61 @@ fun ScanScreen(vm: BleScanViewModel) {
 }
 
 @Composable
-fun DeviceRow(d: BleDevice, calib: Calibration, onTrack: () -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val meters = calib.estimateMeters(d.rssiSmoothed)
-    val prox = Proximity.fromMeters(meters)
-
-    Column(
+fun PixelRowItem(row: PixelRow, calib: Calibration, onTrack: () -> Unit) {
+    val prox = Proximity.fromMeters(row.meters)
+    Row(
         Modifier
             .fillMaxWidth()
-            .clickable { expanded = !expanded }
-            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .clickable(onClick = onTrack)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SignalDot(prox)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    d.name ?: "(unnamed device)",
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    d.address,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    if (meters < 0) "—" else "~${formatMeters(meters)}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    "${d.rssiRaw} dBm",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            IconButton(onClick = onTrack) {
-                Icon(Icons.Filled.MyLocation, contentDescription = "Track this device")
-            }
-        }
-
-        if (expanded) {
-            Spacer(Modifier.height(6.dp))
-            DetailLine("Proximity", prox.label)
-            DetailLine("Smoothed RSSI", "${d.rssiSmoothed.roundToInt()} dBm")
-            DetailLine("TX power", d.txPower?.let { "$it dBm" } ?: "not advertised")
-            DetailLine(
-                "Service UUIDs",
-                if (d.serviceUuids.isEmpty()) "none" else d.serviceUuids.joinToString("\n")
-            )
-            DetailLine("Manufacturer data", d.manufacturerData ?: "none")
-        }
-    }
-}
-
-@Composable
-fun DetailLine(label: String, value: String) {
-    Row(Modifier.padding(vertical = 2.dp)) {
-        Text(
-            "$label: ",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+        Box(
+            Modifier.size(14.dp).clip(RoundedCornerShape(50)).background(proximityColor(prox))
         )
-        Text(value, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                row.pixelId,
+                style = MaterialTheme.typography.titleSmall,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                if (row.resolved) "resolved" else "resolving…",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (row.resolved) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                if (row.meters < 0) "—" else "~${formatMeters(row.meters)}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "${row.rssiRaw} dBm",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Icon(
+            Icons.Filled.MyLocation,
+            contentDescription = "Track",
+            modifier = Modifier.padding(start = 8.dp)
+        )
     }
-}
-
-@Composable
-fun SignalDot(prox: Proximity) {
-    Box(
-        Modifier
-            .size(14.dp)
-            .clip(RoundedCornerShape(50))
-            .background(proximityColor(prox))
-    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TrackerScreen(vm: BleScanViewModel) {
-    val devices by vm.devices.collectAsStateWithLifecycle()
-    val tracked by vm.trackedAddress.collectAsStateWithLifecycle()
-    val calib by vm.calibration.collectAsStateWithLifecycle()
-
-    // Look up the tracked device in the (unfiltered) store via current list.
-    val device = devices.firstOrNull { it.address == tracked }
-    val meters = device?.let { calib.estimateMeters(it.rssiSmoothed) } ?: -1.0
+fun TrackerScreen(vm: PixelScanViewModel) {
+    val rows by vm.rows.collectAsStateWithLifecycle()
+    val tracked by vm.trackedId.collectAsStateWithLifecycle()
+    val row = rows.firstOrNull { it.pixelId == tracked }
+    val meters = row?.meters ?: -1.0
     val prox = Proximity.fromMeters(meters)
 
     Scaffold(
@@ -287,58 +256,100 @@ fun TrackerScreen(vm: BleScanViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                device?.name ?: (tracked ?: ""),
-                style = MaterialTheme.typography.headlineSmall,
+                tracked ?: "",
+                style = MaterialTheme.typography.titleLarge,
+                fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold
             )
-            Text(
-                tracked ?: "",
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
             Spacer(Modifier.height(40.dp))
-
             Box(
-                Modifier
-                    .size(240.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(proximityColor(prox)),
+                Modifier.size(240.dp).clip(RoundedCornerShape(50)).background(proximityColor(prox)),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        if (meters < 0 || device == null) "—" else formatMeters(meters),
+                        if (meters < 0 || row == null) "—" else formatMeters(meters),
                         fontSize = 56.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.Black
                     )
                     Text(
-                        if (device == null) "signal lost" else prox.label,
+                        if (row == null) "signal lost" else prox.label,
                         color = Color.Black,
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
             }
-
             Spacer(Modifier.height(32.dp))
-
-            device?.let {
+            row?.let {
                 Text("Raw RSSI: ${it.rssiRaw} dBm", style = MaterialTheme.typography.bodyLarge)
                 Text(
                     "Smoothed: ${it.rssiSmoothed.roundToInt()} dBm",
-                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } ?: Text(
-                "Waiting to hear from this device again…",
+                "Waiting to hear from this Pixel again…",
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
             Spacer(Modifier.height(24.dp))
             Text(
                 "Walk around: the meter grows as you get closer.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CredentialsScreen(
+    initialOwner: String,
+    initialKey: String,
+    onSave: (String, String) -> Unit
+) {
+    var owner by remember { mutableStateOf(initialOwner) }
+    var key by remember { mutableStateOf(initialKey) }
+
+    Scaffold(topBar = { TopAppBar(title = { Text("Wiliot credentials") }) }) { padding ->
+        Column(
+            Modifier.padding(padding).fillMaxSize().padding(24.dp)
+        ) {
+            Text(
+                "Enter your Wiliot owner ID and API key. These are used to resolve " +
+                        "encrypted Pixel packets into real Pixel IDs. RSSI and distance are " +
+                        "computed on-device and never uploaded.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(24.dp))
+            OutlinedTextField(
+                value = owner,
+                onValueChange = { owner = it },
+                label = { Text("Owner ID") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = key,
+                onValueChange = { key = it },
+                label = { Text("API key") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = { onSave(owner, key) },
+                enabled = owner.isNotBlank() && key.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Save & continue") }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "You can get these from the Wiliot management console (owner/account ID " +
+                        "and a mobile/gateway API key).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -350,16 +361,14 @@ fun TrackerScreen(vm: BleScanViewModel) {
 fun CalibrationCard(calib: Calibration, onChange: (Calibration) -> Unit) {
     Card(Modifier.fillMaxWidth().padding(12.dp)) {
         Column(Modifier.padding(16.dp)) {
-            Text("Calibration", style = MaterialTheme.typography.titleSmall)
+            Text("Calibration (on-device)", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(8.dp))
-
-            Text("RSSI at 1 m: ${calib.txAt1m} dBm", style = MaterialTheme.typography.bodySmall)
+            Text("RSSI at 1 m: ${calib.rssiAt1m} dBm", style = MaterialTheme.typography.bodySmall)
             Slider(
-                value = calib.txAt1m.toFloat(),
-                onValueChange = { onChange(calib.copy(txAt1m = it.roundToInt())) },
+                value = calib.rssiAt1m.toFloat(),
+                onValueChange = { onChange(calib.copy(rssiAt1m = it.roundToInt())) },
                 valueRange = -90f..-40f
             )
-
             Text(
                 "Path-loss exponent: ${"%.1f".format(calib.pathLoss)}",
                 style = MaterialTheme.typography.bodySmall
@@ -368,12 +377,6 @@ fun CalibrationCard(calib: Calibration, onChange: (Calibration) -> Unit) {
                 value = calib.pathLoss.toFloat(),
                 onValueChange = { onChange(calib.copy(pathLoss = (it * 10).roundToInt() / 10.0)) },
                 valueRange = 1.6f..4.0f
-            )
-            Text(
-                "Tip: put the phone 1 m from a device and adjust 'RSSI at 1 m' until the " +
-                        "estimate reads ~1 m. Higher path-loss = more attenuation (walls, bodies).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -386,31 +389,15 @@ fun PermissionGate(onRequest: () -> Unit) {
             Icon(Icons.Filled.Bluetooth, contentDescription = null, modifier = Modifier.size(48.dp))
             Spacer(Modifier.height(16.dp))
             Text(
-                "This app needs the Nearby devices (Bluetooth) permission to scan for BLE " +
-                        "advertisements. It does not use your location.",
+                "This app needs Nearby devices (Bluetooth) and Location permissions. " +
+                        "The Wiliot SDK requires location to scan for BLE Pixels.",
                 style = MaterialTheme.typography.bodyMedium
             )
             Spacer(Modifier.height(16.dp))
-            Button(onClick = onRequest) { Text("Grant permission") }
+            Button(onClick = onRequest) { Text("Grant permissions") }
         }
     }
 }
-
-@Composable
-fun BluetoothOffGate() {
-    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Filled.BluetoothDisabled, contentDescription = null, modifier = Modifier.size(48.dp))
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "Bluetooth is turned off. Enable it from Quick Settings, then reopen the app.",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-    }
-}
-
-// ---- helpers ----
 
 private fun formatMeters(m: Double): String =
     if (m < 1.0) "%.2f m".format(m) else "%.1f m".format(m)

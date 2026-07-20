@@ -1,117 +1,114 @@
-# BLE Proximity
+# Pixel Proximity (Wiliot)
 
-An Android app for the Pixel 8 Pro (and any Android 12+ phone) that uses the
-phone's Bluetooth radio to detect BLE advertisements and estimate how close you
-are to each device from its RSSI (signal strength).
+Android app for the Pixel 8 Pro that detects **Wiliot Pixel** BLE tags, resolves
+their real **Pixel IDs** via the Wiliot cloud, and tells you how close you are to
+a specific Pixel using on-device RSSI. Built for environments with many Pixels
+in range — search by Pixel ID and track one.
 
-## What it does
+## Why this is different from a plain BLE scanner
 
-- **Live scan** of all nearby BLE broadcasters, sorted strongest-signal-first.
-- **Search / filter** by device name or address — built for environments with
-  100+ devices in range at once.
-- **Distance estimate** in meters from RSSI, with a calibration panel
-  (RSSI-at-1m and path-loss exponent) so you can tune it to your environment.
-- **Track one device**: tap the target icon on any row for a big proximity meter
-  that grows as you get closer — walk around and home in on it.
-- **Raw advertising data**: tap a row to expand device name, address, TX power,
-  service UUIDs, and manufacturer-specific data.
+Wiliot Pixels don't broadcast a readable ID. Their advertising payload is
+**encrypted and rotating** for privacy, so the MAC address / raw bytes you'd see
+in a generic BLE scanner are useless as an identifier. To get a stable Pixel ID
+you must send the encrypted payload to the **Wiliot cloud** to be resolved. This
+app uses the official [Wiliot Android SDK](https://github.com/OpenAmbientIoT/wiliot-android-sdk)
+to do exactly that.
 
-RSSI smoothing (an exponential moving average) is applied so the numbers don't
-jump around wildly.
+## Privacy: what leaves the device
 
-## How distance is estimated
+- **Sent to Wiliot cloud (REST):** only the encrypted payload + tag id needed to
+  resolve a Pixel ID. This is done by the `wiliot-network-meta` module's
+  `/v1/owner/{ownerId}/resolve` call. **RSSI is NOT part of that request.**
+- **Stays on the device:** RSSI and all distance / closer-further math. The app
+  also disables the SDK's telemetry pipeline (`pixelsTrafficEnabled = false`,
+  `edgeTrafficEnabled = false`) so RSSI/packet-count telemetry is never published
+  to Wiliot's MQTT broker.
 
-```
-distance(m) = 10 ^ ((RSSI_at_1m - RSSI) / (10 * pathLoss))
-```
+> Caveat: the SDK's foreground-service/queue module may still open an MQTT
+> connection for service heartbeat/capabilities, but with pixel + edge traffic
+> disabled it does not publish your RSSI or packet data. ID resolution itself is
+> REST-only and never includes RSSI.
 
-RSSI-to-distance is inherently noisy — walls, bodies, orientation, and radio
-chip differences all affect it. Treat the meters value as a *relative* guide
-(closer vs. farther), not a precise measurement. Calibrate for best results:
-place the phone ~1 m from a device and adjust **RSSI at 1 m** until the estimate
-reads about 1 m.
+## Credentials
+
+On first launch the app asks for your **Wiliot owner ID** and **API key**
+(entered at runtime, stored in app-private storage — no hardcoding). Get these
+from the Wiliot management console. Use the "clear credentials" (logout) icon in
+the top bar to change them.
+
+## Features
+
+- Live list of nearby Wiliot Pixels, sorted by signal strength (closest first).
+- Each row shows the resolved **Pixel ID**, a `resolving…/resolved` state, an
+  estimated distance, and raw RSSI.
+- **Search Pixel ID** — filter the list as you type.
+- **Tap a Pixel** to open a big proximity meter that grows as you approach.
+- **Calibration** panel (RSSI-at-1m + path-loss) to tune distance to your space.
+
+---
+
+## ⚠️ Read this before you build: SDK symbol reconciliation
+
+This project was written against the Wiliot SDK **source** (v3.9.0). Because the
+SDK is a fast-moving binary dependency, a few symbol names may differ in the
+version you actually pull from Maven Central. Everything Wiliot-specific is
+isolated in **three files**, so if the first build reports unresolved references,
+these are the only places to fix (the compiler error points right at the line):
+
+1. `WiliotController.kt` — SDK init + config. Watch these symbols:
+   - `WiliotAppConfigurationSource.DefaultSdkPreferenceSource` and its override
+     methods: `ownerId()`, `resolveEnabled()`, `pixelsTrafficEnabled()`,
+     `edgeTrafficEnabled()`, `isServicePhoenixEnabled()`.
+   - The module init extensions: `initQueue()`, `initUpstream()`,
+     `initMetaNetwork()`, `initDataResolver()` (and their import packages).
+   - `Wiliot.init { … }` scope: `contextProviderBy`, `setApiKey(...)`,
+     `frameworkDelegateBy`, `locationManagerBy`.
+2. `LocationManagerImpl.kt` — must match `LocationManagerContract`. If method
+   signatures differ, copy the canonical file from the SDK sample:
+   `app/src/main/java/com/wiliot/wiliotandroidsdk/utils/LocationManagerImpl.kt`.
+3. `PixelScanViewModel.kt` — the data Flows and model fields:
+   - `WiliotDataResolver.beaconsFlow()` → `List<PacketData>`
+   - `WiliotDataResolver.resolveInfoFlow()` → resolved identities
+   - `PacketData.rssi`, `PacketData.deviceMAC`, `PacketData.name`
+     (`name` = raw endpoint id until resolved, then the resolved Pixel ID).
+
+Also confirm the current BOM version and set it in `app/build.gradle.kts`
+(`val wiliotBom`): <https://central.sonatype.com/artifact/com.wiliot/wiliot-bom>
+
+If any symbol truly moved, search the SDK source and adjust — or send me the
+build error and I'll patch it.
 
 ---
 
 ## Getting the APK
 
-You have two options. **Option A (cloud build)** needs no Android Studio.
-**Option B** builds locally in Android Studio.
+The Wiliot SDK is on Maven Central, which the cloud build can reach.
 
-### Option A — Build in the cloud with GitHub Actions (no Mac setup)
+### Option A — GitHub Actions (no Mac setup)
 
-1. Create a free account at https://github.com and a new **private** repository
-   (e.g. `ble-proximity`).
-2. Upload this whole `BleProximity` folder to the repo. Easiest way on a Mac:
-   - Install GitHub Desktop (https://desktop.github.com), or
-   - Use the web UI: on the repo page, "Add file" → "Upload files" and drag the
-     contents in. Make sure the `.github/workflows/build.yml` file is included
-     (it may be hidden — enable "show hidden files" with `Cmd+Shift+.` in Finder).
-3. The push automatically triggers the **Build APK** workflow. Open the
-   **Actions** tab in your repo and watch it run (~3-5 min).
-4. When it finishes (green check), click the run, scroll to **Artifacts**, and
-   download **`ble-proximity-debug-apk`**. Unzip it to get `app-debug.apk`.
-5. Transfer `app-debug.apk` to your phone (email it to yourself, Google Drive,
-   or USB) and open it to install — see **Installing** below.
+1. Create a GitHub repo and upload this `WiliotPixelProximity` folder (include the
+   hidden `.github/workflows/build.yml`).
+2. Open the **Actions** tab — the **Build APK** workflow runs automatically.
+3. Download the **`pixel-proximity-debug-apk`** artifact, unzip, get
+   `app-debug.apk`, transfer to your phone, install.
 
-You can re-run the build anytime from the Actions tab ("Run workflow").
+### Option B — Android Studio (local, works on your Mac)
 
-### Option B — Build locally in Android Studio (works great on Mac, incl. M-series)
+1. Install Android Studio, **File → Open** this folder, let Gradle sync.
+2. **Build → Build APK(s)**, or press **Run** with your phone connected
+   (developer mode + USB debugging on).
 
-1. Download Android Studio (free): https://developer.android.com/studio and
-   install it. On first launch it downloads the Android SDK automatically.
-2. **File → Open** and select this `BleProximity` folder. Let Gradle sync
-   finish (it will download Gradle 8.9 and dependencies on first run).
-3. Build the APK: **Build → Build Bundle(s) / APK(s) → Build APK(s)**. When it's
-   done, click **locate** in the notification to find `app-debug.apk` under
-   `app/build/outputs/apk/debug/`.
-   - Or, with your phone plugged in and USB debugging on, just press **Run** (▶)
-     to install and launch it directly.
+## Installing on the Pixel 8 Pro
 
----
+Open `app-debug.apk` from the Files app, allow "install from unknown apps" for
+that source, install, launch. Grant **Nearby devices** + **Location** when asked
+(the Wiliot SDK requires location for BLE scanning), then enter credentials and
+press **Scan**.
 
-## Installing the APK on your Pixel 8 Pro
+## Notes
 
-Since this is a debug APK (not from the Play Store), allow installs from your
-transfer app:
-
-1. Copy `app-debug.apk` to the phone.
-2. Open it with the Files app. Android will prompt about "unknown apps" — tap
-   **Settings** and enable **Allow from this source** for whichever app you're
-   installing from, then go back and tap **Install**.
-3. Launch **BLE Proximity**. On first run it asks for the **Nearby devices**
-   permission — tap **Allow**. (No location permission is requested.)
-4. Make sure Bluetooth is on, then press **Scan**.
-
-## Notes & customization
-
-- **Package / app id**: `com.example.bleproximity`. Change it in
-  `app/build.gradle.kts` (`applicationId` + `namespace`) and the folder/package
-  in `app/src/main/java/...` if you want your own id.
-- **Min Android version**: 12 (API 31). The Pixel 8 Pro ships with 14+, so
-  you're well covered. This lets the app use the modern `BLUETOOTH_SCAN`
-  permission and skip location access entirely.
-- **Stale timeout**: devices not heard from for 12 s drop off the list. Tune
-  `staleMillis` in `BleScanViewModel.kt`.
-- **Scan aggressiveness**: uses `SCAN_MODE_LOW_LATENCY` for the fastest updates
-  (higher battery use). Change it in `BleScanViewModel.start()`.
-
-## Project layout
-
-```
-BleProximity/
-├─ settings.gradle.kts
-├─ build.gradle.kts            (plugin versions)
-├─ gradle.properties
-├─ gradle/wrapper/gradle-wrapper.properties
-├─ .github/workflows/build.yml (cloud APK build)
-└─ app/
-   ├─ build.gradle.kts
-   └─ src/main/
-      ├─ AndroidManifest.xml   (BLE permissions)
-      ├─ java/com/example/bleproximity/
-      │  ├─ MainActivity.kt         (Compose UI: list, search, tracker, calibration)
-      │  ├─ BleScanViewModel.kt     (BluetoothLeScanner + RSSI smoothing + filtering)
-      │  └─ BleModels.kt            (data classes + distance math)
-      └─ res/                       (theme, strings, launcher icon)
+- **Package/app id**: `com.example.pixelproximity` — change in
+  `app/build.gradle.kts` + folder if you want your own.
+- **minSdk 29** (Wiliot requirement); your Pixel 8 Pro is far above that.
+- This is a debug build (self-signed) — fine for sideloading to your own phone.
 ```
