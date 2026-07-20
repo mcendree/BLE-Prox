@@ -4,11 +4,16 @@ import android.app.Application
 import android.util.Log
 import com.wiliot.wiliotcore.FrameworkDelegate
 import com.wiliot.wiliotcore.Wiliot
-import com.wiliot.wiliotcore.config.WiliotAppConfigurationSource
+import com.wiliot.wiliotcore.contextProviderBy
+import com.wiliot.wiliotcore.frameworkDelegateBy
+import com.wiliot.wiliotcore.locationManagerBy
 import com.wiliot.wiliotcore.setApiKey
-// Module init extensions (each lives in its own module):
+import com.wiliot.wiliotcore.utils.helper.WiliotAppConfigurationSource
+import com.wiliot.wiliotcore.utils.helper.start
+import com.wiliot.wiliotcore.utils.helper.stop
+// Module init extensions (each lives in its own module package):
 import com.wiliot.wiliotqueue.initQueue
-import com.wiliot.wiliotupstream.initUpstream
+import com.wiliot.wiliotupstream.feature.initUpstream
 import com.wiliot.wiliotnetworkmeta.initMetaNetwork
 import com.wiliot.wiliotresolvedata.initDataResolver
 
