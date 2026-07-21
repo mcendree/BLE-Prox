@@ -13,8 +13,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -103,11 +106,48 @@ fun ScanScreen(vm: PixelScanViewModel, onSignOut: () -> Unit) {
     val calibration by vm.calibration.collectAsStateWithLifecycle()
     var showCalib by remember { mutableStateOf(false) }
 
+    val ctx = LocalContext.current
+    var showCrash by remember { mutableStateOf(false) }
+    var crashText by remember { mutableStateOf<String?>(null) }
+
+    if (showCrash) {
+        AlertDialog(
+            onDismissRequest = { showCrash = false },
+            confirmButton = {
+                TextButton(onClick = { showCrash = false }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = { CrashLog.clear(ctx); crashText = null; showCrash = false }) {
+                    Text("Clear")
+                }
+            },
+            title = { Text("Last crash") },
+            text = {
+                val t = crashText
+                if (t.isNullOrBlank()) {
+                    Text("No crash recorded. If the app closed on Scan, reopen it and check here.")
+                } else {
+                    SelectionContainer {
+                        Text(
+                            t,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())
+                        )
+                    }
+                }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Wiliot Pixels") },
                 actions = {
+                    IconButton(onClick = { crashText = CrashLog.read(ctx); showCrash = true }) {
+                        Icon(Icons.Filled.BugReport, contentDescription = "Last crash")
+                    }
                     IconButton(onClick = { showCalib = !showCalib }) {
                         Icon(Icons.Filled.Tune, contentDescription = "Calibration")
                     }

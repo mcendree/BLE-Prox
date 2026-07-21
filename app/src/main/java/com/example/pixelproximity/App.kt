@@ -12,6 +12,7 @@ class App : Application(), Wiliot.ContextInitializationProvider {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        CrashLog.install(this)
     }
 
     override fun provideContext(): Application = this
