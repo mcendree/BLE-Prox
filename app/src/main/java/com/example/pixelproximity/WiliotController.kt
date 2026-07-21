@@ -72,8 +72,9 @@ object WiliotController {
                 override fun pixelsTrafficEnabled(): Boolean = false
                 override fun edgeTrafficEnabled(): Boolean = false
 
-                // Restart the SDK service automatically if it dies.
-                override fun isServicePhoenixEnabled(): Boolean = true
+                // Keep the SDK from auto-relaunching its own service; we manage
+                // start/stop ourselves (and re-start from Application.onCreate).
+                override fun isServicePhoenixEnabled(): Boolean = false
             }
         )
 
