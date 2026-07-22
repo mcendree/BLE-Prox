@@ -54,7 +54,8 @@ class PixelScanViewModel(app: Application) : AndroidViewModel(app) {
 
     fun start() {
         if (_scanning.value) return
-        WiliotController.ensureStarted(getApplication(), creds.ownerId, creds.apiKey)
+        WiliotController.ensureInit(getApplication(), creds.ownerId, creds.apiKey)
+        WiliotController.start()
         _scanning.value = true
 
         collectJob = viewModelScope.launch {

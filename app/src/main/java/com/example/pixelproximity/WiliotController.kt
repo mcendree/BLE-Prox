@@ -18,62 +18,36 @@ import com.wiliot.wiliotnetworkmeta.initMetaNetwork
 import com.wiliot.wiliotresolvedata.initDataResolver
 
 /**
- * Centralizes all Wiliot SDK wiring so the rest of the app never touches SDK
- * internals directly. If SDK symbols differ in your version, this is the ONE
- * file (plus LocationManagerImpl) you'll need to reconcile.
+ * All Wiliot SDK wiring lives here.
  *
- * Privacy configuration (the whole point of this setup):
- *   - resolveEnabled = true      -> resolve encrypted payloads into Pixel IDs (REST, no RSSI sent)
- *   - pixelsTrafficEnabled = false -> do NOT publish pixel telemetry (RSSI/counts) to MQTT
- *   - edgeTrafficEnabled  = false -> do NOT publish edge/bridge telemetry
- * Result: the only thing leaving the device is the encrypted payload needed to
- * resolve a Pixel ID. RSSI stays local and drives distance on-device.
+ * IMPORTANT — sticky-service crash workaround:
+ * The SDK's scanner runs in a START_STICKY foreground service. Its
+ * onStartCommand throws if the QueueManager provider isn't wired, and the
+ * provider is ONLY wired inside Wiliot.start(). When Android kills and
+ * re-delivers the sticky service (null intent) in a fresh process, the provider
+ * would be unwired -> crash. So we call [start] from Application.onCreate() on
+ * every process start (when set up + permitted). Inside Wiliot.start(), the
+ * provider is wired BEFORE the foreground-service launch, so even if the launch
+ * throws (e.g. background start not allowed), the provider is already set and
+ * the re-delivered service can stop itself cleanly instead of crashing.
+ *
+ * Privacy config: resolve IDs (REST, no RSSI) but do NOT upload telemetry.
  */
 object WiliotController {
 
     private const val TAG = "WiliotController"
     private var initialized = false
-    @Volatile var started = false
-        private set
 
-    fun ensureStarted(app: Application, ownerId: String, apiKey: String) {
-        if (!initialized) {
-            initSdk(app, ownerId, apiKey)
-            initialized = true
-        }
-        try {
-            Wiliot.start()
-            started = true
-        } catch (t: Throwable) {
-            Log.e(TAG, "Wiliot.start() failed", t)
-        }
-    }
+    /** Register modules + config. Safe to call on every process start. Requires credentials. */
+    fun ensureInit(app: Application, ownerId: String, apiKey: String) {
+        if (initialized) return
 
-    fun stop() {
-        try {
-            Wiliot.stop()
-        } catch (t: Throwable) {
-            Log.e(TAG, "Wiliot.stop() failed", t)
-        }
-        started = false
-    }
-
-    private fun initSdk(app: Application, owner: String, apiKey: String) {
-        // Global SDK preferences. Method names below come from
-        // WiliotAppConfigurationSource.DefaultSdkPreferenceSource.
         WiliotAppConfigurationSource.initialize(
             object : WiliotAppConfigurationSource.DefaultSdkPreferenceSource() {
-                override fun ownerId(): String = owner
-
-                // Turn ON id resolution.
-                override fun resolveEnabled(): Boolean = true
-
-                // Turn OFF telemetry uploads so RSSI / packet counts never leave the phone.
-                override fun pixelsTrafficEnabled(): Boolean = false
+                override fun ownerId(): String = ownerId
+                override fun resolveEnabled(): Boolean = true      // resolve Pixel IDs
+                override fun pixelsTrafficEnabled(): Boolean = false // don't upload RSSI/telemetry
                 override fun edgeTrafficEnabled(): Boolean = false
-
-                // Keep the SDK from auto-relaunching its own service; we manage
-                // start/stop ourselves (and re-start from Application.onCreate).
                 override fun isServicePhoenixEnabled(): Boolean = false
             }
         )
@@ -84,21 +58,40 @@ object WiliotController {
         Wiliot.init {
             this contextProviderBy App.instance
             setApiKey(apiKey)
-
             this frameworkDelegateBy object : FrameworkDelegate() {
                 override fun applicationName(): String = "Wiliot Pixel Proximity"
                 override fun applicationVersion(): Int = 1
                 override fun applicationVersionName(): String = "1.0"
             }
-
             this locationManagerBy LocationManagerImpl
 
-            // Modules: queue + upstream give us the BLE scanner; network-meta +
-            // data-resolver give us cloud ID resolution.
             initQueue()
             initUpstream()
             initMetaNetwork()
             initDataResolver()
+        }
+        initialized = true
+    }
+
+    /**
+     * Starts the gateway. Also (critically) wires the QueueManager provider.
+     * Wrapped in try/catch: if the foreground-service launch is disallowed
+     * (background process), the provider is already wired by this point, so we
+     * simply swallow the exception.
+     */
+    fun start() {
+        try {
+            Wiliot.start()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Wiliot.start() threw (provider is already wired): ${t.message}")
+        }
+    }
+
+    fun stop() {
+        try {
+            Wiliot.stop()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Wiliot.stop() failed: ${t.message}")
         }
     }
 }
