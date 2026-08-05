@@ -56,6 +56,7 @@ private val REQUIRED_PERMISSIONS: Array<String>
     get() = buildList {
         add(Manifest.permission.BLUETOOTH_SCAN)
         add(Manifest.permission.BLUETOOTH_CONNECT)
+        add(Manifest.permission.BLUETOOTH_ADVERTISE) // Wiliot gateway advertises BLE calibration packets
         add(Manifest.permission.ACCESS_FINE_LOCATION) // Wiliot SDK requires location for scanning
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
     }.toTypedArray()
@@ -70,8 +71,9 @@ fun AppRoot(vm: PixelScanViewModel = viewModel()) {
         CredentialsScreen(
             initialOwner = store.ownerId,
             initialKey = store.apiKey,
-            onSave = { owner, key ->
-                store.save(owner, key)
+            initialGateway = store.gatewayId,
+            onSave = { owner, key, gateway ->
+                store.save(owner, key, gateway)
                 hasCreds = true
             }
         )
@@ -104,6 +106,9 @@ fun ScanScreen(vm: PixelScanViewModel, onSignOut: () -> Unit) {
     val scanning by vm.scanning.collectAsStateWithLifecycle()
     val query by vm.query.collectAsStateWithLifecycle()
     val calibration by vm.calibration.collectAsStateWithLifecycle()
+    val resolved by vm.resolvedCount.collectAsStateWithLifecycle()
+    val rawTotal by vm.rawTotal.collectAsStateWithLifecycle()
+    val rawWiliot by vm.rawWiliot.collectAsStateWithLifecycle()
     var showCalib by remember { mutableStateOf(false) }
 
     val ctx = LocalContext.current
@@ -188,13 +193,23 @@ fun ScanScreen(vm: PixelScanViewModel, onSignOut: () -> Unit) {
                 }
             )
 
-            Text(
-                text = if (scanning) "Scanning • ${rows.size} pixel(s)"
-                else "Stopped • press Scan",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-            )
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                Text(
+                    text = if (scanning) {
+                        val shown = if (query.isNotBlank()) " • showing ${rows.size}" else ""
+                        "Pixels seen $rawWiliot • resolved $resolved$shown"
+                    } else "Stopped • press Scan",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (scanning) {
+                    Text(
+                        text = "Raw radio • all BLE $rawTotal",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             if (showCalib) CalibrationCard(calibration) { vm.setCalibration(it) }
 
@@ -346,19 +361,21 @@ fun TrackerScreen(vm: PixelScanViewModel) {
 fun CredentialsScreen(
     initialOwner: String,
     initialKey: String,
-    onSave: (String, String) -> Unit
+    initialGateway: String,
+    onSave: (String, String, String) -> Unit
 ) {
     var owner by remember { mutableStateOf(initialOwner) }
     var key by remember { mutableStateOf(initialKey) }
+    var gateway by remember { mutableStateOf(initialGateway) }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Wiliot credentials") }) }) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxSize().padding(24.dp)
+            Modifier.padding(padding).fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())
         ) {
             Text(
-                "Enter your Wiliot owner ID and API key. These are used to resolve " +
-                        "encrypted Pixel packets into real Pixel IDs. RSSI and distance are " +
-                        "computed on-device and never uploaded.",
+                "Enter your Wiliot owner ID and API key. These resolve encrypted Pixel " +
+                        "packets into real Pixel IDs. RSSI and distance are computed on-device " +
+                        "and never uploaded.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -380,16 +397,25 @@ fun CredentialsScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = gateway,
+                onValueChange = { gateway = it },
+                label = { Text("Gateway ID") },
+                singleLine = true,
+                supportingText = { Text("Used in the resolve request. Try a gateway ID registered under your owner if you get Access Denied.") },
+                modifier = Modifier.fillMaxWidth()
+            )
             Spacer(Modifier.height(24.dp))
             Button(
-                onClick = { onSave(owner, key) },
+                onClick = { onSave(owner, key, gateway) },
                 enabled = owner.isNotBlank() && key.isNotBlank(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save & continue") }
             Spacer(Modifier.height(12.dp))
             Text(
-                "You can get these from the Wiliot management console (owner/account ID " +
-                        "and a mobile/gateway API key).",
+                "Get these from the Wiliot management console (owner ID, an API key with " +
+                        "resolve permission, and optionally a registered gateway ID).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

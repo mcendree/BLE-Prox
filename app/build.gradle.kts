@@ -75,5 +75,8 @@ dependencies {
 
     implementation("com.google.android.material:material:1.12.0")
 
+    // Direct Wiliot cloud REST calls (auth + resolve).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

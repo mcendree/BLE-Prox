@@ -1,30 +1,33 @@
 package com.example.pixelproximity
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.wiliot.wiliotcore.model.PacketData
-import com.wiliot.wiliotresolvedata.WiliotDataResolver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Bridges the Wiliot SDK data Flows into a simple, searchable, RSSI-sorted list.
- *
- * Two SDK Flows are merged:
- *   - WiliotDataResolver.beaconsFlow()     -> List<PacketData>  (has local RSSI)
- *   - WiliotDataResolver.resolveInfoFlow() -> List<IResolveInfo> (resolved Pixel IDs)
- *
- * Both underlying objects are PacketData, so we join them on the local BLE MAC
- * (PacketData.deviceMAC). RSSI + distance are computed purely on-device.
+ * New data path (no SDK gateway):
+ *   RawBleProbe  --(payload,mac,rssi)-->  resolve queue  --workers-->  Wiliot REST /resolve
+ *   resolved externalId + local RSSI  -->  grouped rows (searchable, sortable, trackable)
  */
 class PixelScanViewModel(app: Application) : AndroidViewModel(app) {
 
+    private val TAG = "PixelVM"
     private val creds = CredentialStore(app)
+    private val rawProbe = RawBleProbe(app)
+    private var client: WiliotRestClient? = null
+
+    // Raw radio diagnostics (still useful in the header).
+    val rawTotal: StateFlow<Int> = rawProbe.total
+    val rawWiliot: StateFlow<Int> = rawProbe.wiliot
 
     private val _rows = MutableStateFlow<List<PixelRow>>(emptyList())
     val rows: StateFlow<List<PixelRow>> = _rows.asStateFlow()
@@ -41,82 +44,120 @@ class PixelScanViewModel(app: Application) : AndroidViewModel(app) {
     private val _calibration = MutableStateFlow(Calibration())
     val calibration: StateFlow<Calibration> = _calibration.asStateFlow()
 
-    private val ema = HashMap<String, Double>()   // key(MAC) -> smoothed RSSI
-    private val smoothing = 0.35
-    private var collectJob: Job? = null
+    private val _resolvedCount = MutableStateFlow(0)
+    val resolvedCount: StateFlow<Int> = _resolvedCount.asStateFlow()
 
-    // Keep the last merged snapshot so re-filtering (search) is instant.
-    private var lastSnapshot: List<PixelRow> = emptyList()
+    // externalId -> live stats (guarded by `lock`)
+    private data class Stat(var rssiRaw: Int, var ema: Double, var lastSeen: Long)
+    private val lock = Any()
+    private val stats = HashMap<String, Stat>()
 
-    fun setQuery(q: String) { _query.value = q; publish() }
+    // payload -> last-resolved timestamp, to avoid re-resolving identical repeats
+    private val recentPayloads = HashMap<String, Long>()
+
+    private data class Obs(val payload: String, val mac: String, val rssi: Int)
+    private val queue = Channel<Obs>(capacity = 128, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    private val workers = mutableListOf<Job>()
+    private val smoothing = 0.4
+    private val staleMs = 30_000L
+    private val dedupeTtlMs = 4_000L
+
+    fun setQuery(q: String) { _query.value = q; rebuild() }
     fun setTracked(id: String?) { _trackedId.value = id }
-    fun setCalibration(c: Calibration) { _calibration.value = c; publish() }
+    fun setCalibration(c: Calibration) { _calibration.value = c; rebuild() }
 
     fun start() {
         if (_scanning.value) return
-        WiliotController.ensureInit(getApplication(), creds.ownerId, creds.apiKey)
-        WiliotController.start()
+        if (!creds.hasCredentials) { Log.e(TAG, "no credentials"); return }
+        client = WiliotRestClient(
+            apiBase = WiliotRestClient.GCP_WMT_PROD_API,
+            ownerId = creds.ownerId,
+            apiKey = creds.apiKey,
+            gatewayId = creds.gatewayId
+        )
         _scanning.value = true
+        Log.i(TAG, "start(): scanning + resolving")
 
-        collectJob = viewModelScope.launch {
-            combine(
-                WiliotDataResolver.beaconsFlow(),
-                WiliotDataResolver.resolveInfoFlow()
-            ) { beacons, resolved ->
-                mergeSnapshot(beacons, resolved)
-            }.collect { snapshot ->
-                lastSnapshot = snapshot
-                publish()
-            }
-        }
+        rawProbe.onPixel = { hex, mac, rssi -> queue.trySend(Obs(hex, mac, rssi)) }
+        rawProbe.start()
+
+        // A few workers pull from the queue and resolve payloads via REST.
+        repeat(3) { workers += viewModelScope.launch(Dispatchers.IO) { resolverLoop() } }
     }
 
     fun stop() {
         if (!_scanning.value) return
-        collectJob?.cancel(); collectJob = null
-        WiliotController.stop()
+        rawProbe.onPixel = null
+        rawProbe.stop()
+        workers.forEach { it.cancel() }
+        workers.clear()
         _scanning.value = false
     }
 
-    private fun mergeSnapshot(
-        beacons: List<PacketData>,
-        resolved: List<Any?>
-    ): List<PixelRow> {
-        // Resolved external IDs, keyed by the local MAC.
-        val resolvedIdByMac = HashMap<String, String>()
-        for (item in resolved) {
-            val pd = item as? PacketData ?: continue
-            resolvedIdByMac[pd.deviceMAC] = pd.name
-        }
+    private suspend fun resolverLoop() {
+        for (obs in queue) {
+            val now = System.currentTimeMillis()
+            // Dedupe identical payloads seen within the TTL.
+            val skip = synchronized(recentPayloads) {
+                val last = recentPayloads[obs.payload]
+                if (last != null && now - last < dedupeTtlMs) true
+                else { recentPayloads[obs.payload] = now; false }
+            }
+            if (skip) continue
 
-        val now = System.currentTimeMillis()
-        return beacons.mapNotNull { pd ->
-            val mac = pd.deviceMAC
-            val rssi = pd.rssi ?: return@mapNotNull null
-
-            val prev = ema[mac]
-            val smoothed = if (prev == null) rssi.toDouble()
-            else prev + smoothing * (rssi - prev)
-            ema[mac] = smoothed
-
-            val resolvedId = resolvedIdByMac[mac]
-            val id = resolvedId ?: pd.name   // pd.name = raw endpoint id until resolved
-
-            PixelRow(
-                key = mac,
-                pixelId = id,
-                resolved = resolvedId != null,
-                rssiRaw = rssi,
-                rssiSmoothed = smoothed,
-                meters = _calibration.value.estimateMeters(smoothed),
-                lastSeen = now
-            )
+            val ext = try { client?.resolve(obs.payload) } catch (t: Throwable) {
+                Log.w(TAG, "resolve error: ${t.message}"); null
+            }
+            if (ext != null) {
+                synchronized(lock) {
+                    val s = stats[ext]
+                    if (s == null) stats[ext] = Stat(obs.rssi, obs.rssi.toDouble(), now)
+                    else {
+                        s.rssiRaw = obs.rssi
+                        s.ema += smoothing * (obs.rssi - s.ema)
+                        s.lastSeen = now
+                    }
+                }
+                rebuild()
+            }
+            pruneRecent(now)
         }
     }
 
-    private fun publish() {
+    private fun pruneRecent(now: Long) {
+        if (recentPayloads.size < 3000) return
+        synchronized(recentPayloads) {
+            val it = recentPayloads.entries.iterator()
+            while (it.hasNext()) if (now - it.next().value > dedupeTtlMs) it.remove()
+        }
+    }
+
+    private fun rebuild() {
+        val now = System.currentTimeMillis()
+        val calib = _calibration.value
         val q = _query.value.trim().lowercase()
-        _rows.value = lastSnapshot
+
+        val list: List<PixelRow>
+        synchronized(lock) {
+            // drop pixels not heard from recently
+            val gone = stats.filterValues { now - it.lastSeen > staleMs }.keys
+            gone.forEach { stats.remove(it) }
+
+            list = stats.entries.map { (id, s) ->
+                PixelRow(
+                    key = id,
+                    pixelId = id,
+                    resolved = true,
+                    rssiRaw = s.rssiRaw,
+                    rssiSmoothed = s.ema,
+                    meters = calib.estimateMeters(s.ema),
+                    lastSeen = s.lastSeen
+                )
+            }
+        }
+        _resolvedCount.value = list.size
+        _rows.value = list
             .asSequence()
             .filter { if (q.isEmpty()) true else it.pixelId.lowercase().contains(q) }
             .sortedByDescending { it.rssiSmoothed }
